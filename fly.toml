@@ -11,10 +11,13 @@ primary_region = 'lax'
 
 [env]
   BOOTSTRAP_PEER_NAME = 'peer1'
-  BOOTSTRAP_PORT = '8080'
+  BOOTSTRAP_PORT = '8081'
   BOOTSTRAP_TOKEN = 'password123'
   LOG_CONFS = 'true'
-  PEERDNS = 'auto'
+  # Use public DNS resolvers for peers by default. This avoids relying on the
+  # container's internal 10.13.13.1 DNS, which is not configured on Fly.
+  # Change this if you want to use a different resolver.
+  PEERDNS = '1.1.1.1,1.0.0.1'
   PEERS = '1'
   PGID = '1000'
   PUID = '1000'
@@ -46,7 +49,7 @@ primary_region = 'lax'
 
 [[services]]
   protocol = 'tcp'
-  internal_port = 8080
+  internal_port = 8081
 
   [[services.ports]]
     port = 443

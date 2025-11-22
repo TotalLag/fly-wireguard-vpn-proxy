@@ -49,7 +49,15 @@ This version is designed to be:
 
    The linuxserver WireGuard image stores keys and peer configs under `/config`, which is backed by this volume.
 
-4. **(Recommended) Set a one-time bootstrap token**
+4. **Allocate a dedicated IPv4 address**
+
+   Fly.io shared IPv4 addresses do not support UDP, which WireGuard requires. You must allocate a dedicated IPv4 address ($2/mo) for the VPN to work.
+
+   ```bash
+   fly ips allocate-v4
+   ```
+
+5. **(Recommended) Set a one-time bootstrap token**
 
    ```bash
    fly secrets set BOOTSTRAP_TOKEN='a-very-long-random-string'
@@ -57,13 +65,13 @@ This version is designed to be:
 
    If you skip this, the bootstrap endpoint will still be one-time, but not token-protected.
 
-5. **Deploy**
+6. **Deploy**
 
    ```bash
    fly deploy
    ```
 
-6. **Bootstrap from your browser (QR + config)**
+7. **Bootstrap from your browser (QR + config)**
 
    Once the app is deployed, open in your browser:
 
@@ -81,7 +89,7 @@ This version is designed to be:
 
    On first successful load the app writes `/config/bootstrap_done`. Further calls to `/bootstrap` return HTTP 410 (“already bootstrapped”).
 
-7. **Connect**
+8. **Connect**
 
    Use your WireGuard client as usual; your Fly app is now a WireGuard endpoint listening on UDP port `51820`.
 
@@ -95,7 +103,7 @@ This project is thin Fly.io-specific configuration on top of [`linuxserver/docke
   - **Stage 1**:
     - Uses `golang:alpine` to build a static `bootstrap-http` binary from [`cmd/bootstrap-http/main.go`](cmd/bootstrap-http/main.go).
   - **Stage 2**:
-    - Uses `linuxserver/wireguard:1.0.20210914` as the base.
+    - Uses `linuxserver/wireguard:latest` as the base.
     - Appends sysctl tweaks to an s6-overlay init script so that at container startup:
       - `net.ipv4.conf.all.src_valid_mark=1` is set.
       - `net.ipv4.ip_forward=1` is set (so the instance can forward traffic).
@@ -104,12 +112,12 @@ This project is thin Fly.io-specific configuration on top of [`linuxserver/docke
 
 - [`fly.toml`](fly.toml) defines:
   - A UDP service on internal port `51820` exposed externally on `51820` for WireGuard.
-  - A TCP service on internal port `8080` exposed as HTTPS on `443` for the bootstrap HTTP server.
+  - A TCP service on internal port `8081` exposed as HTTPS on `443` for the bootstrap HTTP server.
   - A volume mount at `/config` named `config` for persistent WireGuard keys and peer configs.
   - Environment variables for the linuxserver image:
     - `PEERS="1"`, `PEERDNS="auto"`, `SERVERPORT=51820`, `PUID=1000`, `PGID=1000`, etc.
   - Environment variables for the bootstrap server:
-    - `BOOTSTRAP_PORT="8080"`, `BOOTSTRAP_PEER_NAME="peer1"`.
+    - `BOOTSTRAP_PORT="8081"`, `BOOTSTRAP_PEER_NAME="peer1"`.
     - `BOOTSTRAP_TOKEN` is set via `fly secrets` for optional auth during bootstrap.
 
 - [`cmd/bootstrap-http/main.go`](cmd/bootstrap-http/main.go) (built into the image) does:
@@ -140,6 +148,15 @@ This project is thin Fly.io-specific configuration on top of [`linuxserver/docke
 This setup is intended as a **personal convenience VPN**, not an anonymity network. Fly’s egress IPs and geo-location behaviour may not always match your selected region exactly, and outbound traffic does not necessarily originate from the app’s public IP.
 
 ---
+
+## Troubleshooting
+
+- **"0 B received" / Handshake failure:**
+  - Ensure you have allocated a **dedicated IPv4 address**. Shared IPv4 addresses on Fly.io do not support UDP.
+  - If you redeployed or recreated the volume, the server keys might have changed. Go to the bootstrap URL again and re-import the configuration to your client.
+
+- **"Address already in use" logs:**
+  - The `linuxserver/wireguard:latest` image runs a service (CoreDNS) on port 8080. This project uses port **8081** for the bootstrap server to avoid this conflict. Ensure your `fly.toml` maps port 443 to 8081.
 
 ## Known issues
 
