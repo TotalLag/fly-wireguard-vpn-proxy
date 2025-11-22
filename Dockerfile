@@ -25,11 +25,29 @@ FROM linuxserver/wireguard:latest
 RUN apk add --no-cache util-linux
 
 # Normally with docker, you would set these sysctls via the run command, but fly.io isn't really docker
-RUN printf '\necho "Writing sysctl settings"\nsysctl -w net.ipv4.conf.all.src_valid_mark=1\nsysctl -w net.ipv4.ip_forward=1\n' >> /etc/s6-overlay/s6-rc.d/init-wireguard-confs/run
+# We also add network optimizations for streaming:
+# - BBR congestion control for better throughput/latency
+# - Larger UDP buffers for WireGuard performance
+# - Optimized TCP settings
+RUN printf '\necho "Writing sysctl settings"\n\
+sysctl -w net.ipv4.conf.all.src_valid_mark=1\n\
+sysctl -w net.ipv4.ip_forward=1\n\
+sysctl -w net.core.default_qdisc=fq\n\
+sysctl -w net.ipv4.tcp_congestion_control=bbr\n\
+sysctl -w net.core.rmem_max=4194304\n\
+sysctl -w net.core.wmem_max=4194304\n\
+sysctl -w net.ipv4.udp_rmem_min=8192\n\
+sysctl -w net.ipv4.udp_wmem_min=8192\n' >> /etc/s6-overlay/s6-rc.d/init-wireguard-confs/run
 
 # Copy bootstrap HTTP binary from builder stage
 COPY --from=builder /out/bootstrap-http /usr/local/bin/bootstrap-http
 RUN chmod +x /usr/local/bin/bootstrap-http
+
+# Disable s6-overlay cron service to allow Fly.io machine to sleep on idle
+RUN rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/svc-cron
+
+# Set MTU to 1280 to avoid fragmentation issues on Fly.io network
+ENV WG_MTU=1280
 
 # Simple entrypoint script:
 # - enable IP forwarding and NAT so the instance actually routes VPN traffic
