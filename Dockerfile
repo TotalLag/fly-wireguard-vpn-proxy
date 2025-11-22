@@ -1,4 +1,28 @@
+# Stage 1: build the bootstrap HTTP+QR server inside the Fly builder
+FROM golang:1.22-alpine AS builder
+
+# Need git so Go can fetch module dependencies
+RUN apk add --no-cache git
+
+WORKDIR /src
+
+# Bootstrap HTTP server source
+COPY cmd/bootstrap-http ./cmd/bootstrap-http
+
+# Initialize a Go module and fetch the QR-code dependency
+RUN go mod init bootstrap-http && \
+    go get github.com/skip2/go-qrcode@latest
+
+# Build a static Linux binary
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -o /out/bootstrap-http ./cmd/bootstrap-http
+
+# Stage 2: runtime image based on linuxserver/wireguard
 FROM linuxserver/wireguard:1.0.20210914
+
+# Make sure we have the full util-linux unshare, not just BusyBox, so we can
+# use the PID-namespace workaround linuxserver images often need for s6-overlay.
+RUN apk add --no-cache util-linux
 
 # Normally with docker, you would set these sysctls via the run command, but fly.io isn't really docker
 RUN echo '\n\
@@ -6,9 +30,15 @@ echo "Writing sysctl settings" \n\
 sysctl -w net.ipv4.conf.all.src_valid_mark=1 \n\
 sysctl -w net.ipv4.ip_forward=1' >> /etc/s6-overlay/s6-rc.d/init-wireguard-confs/run
 
-# Addresses issue with s6-overlay wanting to run as pid 1
-# For more info see https://github.com/pi-hole/docker-pi-hole/issues/1176#issuecomment-1232363970
-ENTRYPOINT [ \
-    "unshare", "--pid", "--fork", "--kill-child=SIGTERM", "--mount-proc", \
-    "perl", "-e", "$SIG{INT}=''; $SIG{TERM}=''; exec @ARGV;", "--", \
-    "/init" ]
+# Copy bootstrap HTTP binary from builder stage
+COPY --from=builder /out/bootstrap-http /usr/local/bin/bootstrap-http
+RUN chmod +x /usr/local/bin/bootstrap-http
+
+# Simple entrypoint script:
+# - start bootstrap-http (listening on 0.0.0.0:8080) in the background
+# - then exec unshare --pid --fork --mount-proc /init so s6-overlay runs as
+#   PID 1 in its own PID namespace, as required.
+RUN printf '#!/bin/sh\nset -e\n/usr/local/bin/bootstrap-http &\nexec unshare --pid --fork --mount-proc /init\n' \
+    > /docker-entrypoint.sh && chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]

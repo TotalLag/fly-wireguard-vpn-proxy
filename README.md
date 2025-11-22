@@ -1,30 +1,147 @@
-# Running a general purpose wireguard VPN on fly.io
+# Personal WireGuard VPN on Fly.io (self-contained HTTPS bootstrap)
 
-Run a VPN for general web browsing, on fly.io
+Run a personal WireGuard VPN for general web browsing on Fly.io.
 
-fly.io utilises wireguard internally for a bunch of stuff, this isn't that.
+Fly.io itself uses WireGuard internally for some features, but this app is **not** part of that; it’s just a small wrapper around the community-maintained [`linuxserver/docker-wireguard`](https://github.com/linuxserver/docker-wireguard) image.
 
-## Why
-- Fly.io has a nice free tier
-- Sometimes you need a VPN to get around content blocking or whatever
+This version is designed to be:
 
-## How
-- Clone this project
-- Run `./launch.sh`
+- **Self-contained** – everything (including a small HTTP+QR bootstrap server) is built inside Fly’s Docker build.
+- **Host-OS agnostic** – you only need `flyctl` installed; no local Docker or Go toolchain required.
+- **Easy to bootstrap** – after deploy, you visit a single HTTPS URL to get:
+  - A QR code for the WireGuard mobile app.
+  - The raw `.conf` for desktop clients.
+- **No post-deploy shell** – no `fly ssh` or container shell required.
 
-## Further information
-This project is just some fly.io specific configuration of the [`linuxserver/docker-wireguard` image](https://github.com/linuxserver/docker-wireguard).
+---
 
-See the documentation there for more information about configuring the VPN to work as you desire.
+## Prerequisites
 
-fly.io uses docker images for it's build process, but a built fly app doesn't actually run on docker, 
-so there are a couple differences we need to cater for.
+- A Fly.io account.
+- `flyctl` installed and authenticated (`fly auth login`).
+- Basic familiarity with WireGuard on your device (mobile or desktop).
+- You are comfortable running a few `fly` CLI commands but don’t want to shell into the app.
 
-Firstly that the docker process doesn't run as pid 1, 
-and secondly that sysctls can be, and need to be configured at run-time, rather than externally.
+---
+
+## Quick start
+
+1. **Clone this project**
+
+   ```bash
+   git clone <this-repo-url>
+   cd <repo>
+   ```
+
+2. **Launch the app (create app + config from `fly.toml`)**
+
+   ```bash
+   fly launch --copy-config --no-deploy --generate-name
+   ```
+
+   This uses the existing `fly.toml` and the [`Dockerfile`](Dockerfile) in this repo. The image (including the bootstrap server) is built on Fly’s builder VMs, not on your local machine.
+
+3. **Create the config volume (once)**
+
+   ```bash
+   fly volumes create config --size 1
+   ```
+
+   The linuxserver WireGuard image stores keys and peer configs under `/config`, which is backed by this volume.
+
+4. **(Recommended) Set a one-time bootstrap token**
+
+   ```bash
+   fly secrets set BOOTSTRAP_TOKEN='a-very-long-random-string'
+   ```
+
+   If you skip this, the bootstrap endpoint will still be one-time, but not token-protected.
+
+5. **Deploy**
+
+   ```bash
+   fly deploy
+   ```
+
+6. **Bootstrap from your browser (QR + config)**
+
+   Once the app is deployed, open in your browser:
+
+   ```text
+   https://<appname>.fly.dev/bootstrap?token=YOUR_BOOTSTRAP_TOKEN
+   ```
+
+   - If you set `BOOTSTRAP_TOKEN`, include `?token=...` as shown.
+   - If you did *not* set a token, just open `/bootstrap` without the query string.
+
+   You will see a single HTML page that shows:
+
+   - A QR code you can scan with the WireGuard mobile app (“Scan from QR code”).
+   - The full WireGuard configuration text you can copy into a desktop client.
+
+   On first successful load the app writes `/config/bootstrap_done`. Further calls to `/bootstrap` return HTTP 410 (“already bootstrapped”).
+
+7. **Connect**
+
+   Use your WireGuard client as usual; your Fly app is now a WireGuard endpoint listening on UDP port `51820`.
+
+---
+
+## How it works
+
+This project is thin Fly.io-specific configuration on top of [`linuxserver/docker-wireguard`](https://github.com/linuxserver/docker-wireguard) and a small Go HTTP server:
+
+- [`Dockerfile`](Dockerfile) is a **multi-stage build**:
+  - **Stage 1**:
+    - Uses `golang:alpine` to build a static `bootstrap-http` binary from [`cmd/bootstrap-http/main.go`](cmd/bootstrap-http/main.go).
+  - **Stage 2**:
+    - Uses `linuxserver/wireguard:1.0.20210914` as the base.
+    - Appends sysctl tweaks to an s6-overlay init script so that at container startup:
+      - `net.ipv4.conf.all.src_valid_mark=1` is set.
+      - `net.ipv4.ip_forward=1` is set (so the instance can forward traffic).
+    - Copies `bootstrap-http` into the image and runs it as a sidecar service under s6-overlay.
+    - Wraps `/init` with `unshare` + `perl` so s6-overlay can behave as PID 1 in Fly’s environment.
+
+- [`fly.toml`](fly.toml) defines:
+  - A UDP service on internal port `51820` exposed externally on `51820` for WireGuard.
+  - A TCP service on internal port `8080` exposed as HTTPS on `443` for the bootstrap HTTP server.
+  - A volume mount at `/config` named `config` for persistent WireGuard keys and peer configs.
+  - Environment variables for the linuxserver image:
+    - `PEERS="1"`, `PEERDNS="auto"`, `SERVERPORT=51820`, `PUID=1000`, `PGID=1000`, etc.
+  - Environment variables for the bootstrap server:
+    - `BOOTSTRAP_PORT="8080"`, `BOOTSTRAP_PEER_NAME="peer1"`.
+    - `BOOTSTRAP_TOKEN` is set via `fly secrets` for optional auth during bootstrap.
+
+- [`cmd/bootstrap-http/main.go`](cmd/bootstrap-http/main.go) (built into the image) does:
+  - Waits for `/config/peer1/peer1.conf` to exist (generated by the WireGuard container).
+  - Exposes:
+    - `GET /healthz` – returns 200 once the config is ready.
+    - `GET /bootstrap` – returns a one-time HTML page with:
+      - A QR code, whose payload is the full WireGuard config text.
+      - The raw config text itself.
+  - Writes `/config/bootstrap_done` before rendering to enforce **one-time bootstrap** semantics.
+
+---
+
+## Security notes
+
+- The **bootstrap page only** (`/bootstrap`) is served over HTTPS at `https://<appname>.fly.dev` and terminated by Fly.
+- The **VPN tunnel** itself is standard WireGuard over UDP port `51820`:
+  - The tunnel is end-to-end encrypted by WireGuard, but it does *not* use TLS.
+  - From the outside, this looks like normal WireGuard UDP traffic, not HTTPS.
+- If you set a `BOOTSTRAP_TOKEN` secret:
+  - `/bootstrap` requires a matching `?token=...` query parameter.
+  - The token is never stored in the repo; it lives only in Fly secrets.
+- WireGuard private keys and peer configs live only on the Fly volume at `/config`.
+- Once bootstrapped:
+  - `/bootstrap` is effectively disabled (returns HTTP 410).
+  - You interact only through your WireGuard clients; there is no ongoing web UI.
+
+This setup is intended as a **personal convenience VPN**, not an anonymity network. Fly’s egress IPs and geo-location behaviour may not always match your selected region exactly, and outbound traffic does not necessarily originate from the app’s public IP.
+
+---
 
 ## Known issues
 
-Currently outbound traffic from fly.io does not go via the public IP of the instance.
-Also fly.io IP addresses seem to not be reliably geo-locatable to the region that you run the app in,
-which may be an issue for you if you want to use the VPN to access geo-fenced content.
+- Currently outbound traffic from Fly.io does not always go via the public IP of the instance.
+- Fly.io IP addresses may not reliably geo-locate to the region where you run the app, which can matter if you want to use the VPN for geo-fenced content.
