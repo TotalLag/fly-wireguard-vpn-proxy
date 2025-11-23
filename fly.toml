@@ -27,17 +27,13 @@ primary_region = 'lax'
   source = 'config'
   destination = '/config'
 
-[http_service]
-  internal_port = 51820
-  force_https = true
-  auto_stop_machines = 'stop'
-  auto_start_machines = true
-  min_machines_running = 0
-  processes = ['app']
-
+# UDP Service for WireGuard
 [[services]]
   protocol = 'udp'
   internal_port = 51820
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
 
   [[services.ports]]
     port = 51820
@@ -47,9 +43,13 @@ primary_region = 'lax'
     hard_limit = 25
     soft_limit = 20
 
+# TCP Service for Bootstrap HTTP
 [[services]]
   protocol = 'tcp'
   internal_port = 8081
+  auto_stop_machines = 'suspend'
+  auto_start_machines = true
+  min_machines_running = 0
 
   [[services.ports]]
     port = 443
